@@ -1,0 +1,334 @@
+---
+title: "HawaiiSimulation"
+output: pdf_document
+date: "2025-03-31"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rstatix)
+#install.packages("fpp3")
+library(fpp3)
+#install.packages(tsibble)
+library(tsibble)
+#install.packages("urca")
+library(urca)
+```
+
+```{r}
+hawaii <- read_csv("co2_mm_mlo.csv", skip = 40)
+
+head(hawaii)
+```
+```{r}
+hawaii2 <- hawaii |> 
+  mutate(date = make_date(year, month)) |> 
+  select(-c(year, month, `decimal date`)) |> 
+  relocate(date, .before = everything())
+
+head(hawaii2)
+```
+
+```{r}
+#Checking for duplicates
+
+hawaii2 |> 
+  group_by(across(everything())) |> 
+  filter(n() > 1)
+```
+
+```{r}
+#Checking for regularity
+
+hawaii3 <- hawaii2 |> 
+  complete(date = seq(min(date), max(date), by = "month"))
+
+head(hawaii3)
+```
+
+```{r}
+#Checking for NAs
+
+hawaii3 |> 
+  filter(if_any(everything(), is.na))
+```
+
+```{r}
+#Checking for outliers
+
+identify_outliers(hawaii3, variable = "average")  
+```
+
+```{r}
+hawaii4 <- hawaii3 |>
+  mutate(date = yearmonth(date)) |> 
+  as_tsibble(
+    index = date
+  )
+
+head(hawaii4)
+```
+
+```{r}
+hawaii4 |> 
+  autoplot(average) +
+  labs(title = "Time Plot: Monthly C02 Levels", y = "C02 Levels", x = "Month")
+
+#There is a positive trend. Variance is stable.
+```
+
+```{r}
+#Investigating seasonality further
+
+hawaii4 |> 
+  filter(year(date) >= max(year(date)) - 12) |> 
+  gg_season(average) + 
+    labs(title = "Seasonal Plot: Monthly C02 Levels", x = "Month", y = "C02 Levels", color = "Year")
+
+#There is a steady decrease from May to September. Then there is a steady increase from September to May.
+```
+
+```{r}
+#Creating train and test sets using a 80-20 split
+
+test <- hawaii4 |> filter(row_number() > n() - 161)  # Select 161 most recent dates
+train <- hawaii4 |> filter(row_number() <= n() - 161)  # Select everything before that
+```
+
+
+```{r}
+#Creating a benchmark model: Seasonal Naive
+
+fit_snaive <- train |> 
+  model(SNAIVE = SNAIVE(average))
+```
+
+```{r}
+#Fitting models: ARIMA
+
+#Because of the seasonality and trend, we will apply differencing to stabilize.  
+
+train |> 
+  gg_tsdisplay(difference(difference(average), 12), plot_type = 'partial', lag = 36) + 
+  labs(title = "Trend and Seasonal Differenced", y = "")
+
+train |> features(difference(difference(average), 12), unitroot_kpss) #We fail to reject the null at a level of .05. Our data is stationary.
+
+#The significant spike at lag 1 in the ACF suggests a non-seasonal MA(1) component. 
+#The significant spike at lag 1 in the PACF suggests a non-seasonal AR(1) component.
+#The significant spike at lag 12 in the ACF suggests a seasonal MA(1) component. 
+#Consequently, we begin with an ARIMA(1,1,1)(0,1,1)[12]
+```
+
+```{r}
+fit_arima <- train |> 
+  model(ARIMA = ARIMA(average, stepwise = FALSE, approximation = FALSE))
+
+fit_arima |> pivot_longer(everything(), names_to = "Model name", values_to = "Orders")
+```
+
+```{r}
+#Fitting models: ETS
+
+fit_ets <- train |> 
+  model(ETS = ETS(average))
+```
+
+```{r}
+#Using one-step forecasts to see which model fits the best
+
+fit_snaive |> 
+  refit(test) |>
+  accuracy()
+
+fit_arima |>
+  refit(test) |>
+  accuracy()
+
+fit_ets |>
+  refit(test) |>
+  accuracy()
+
+#Based on our accuracy metrics, the ETS model fits the best.
+```
+
+
+```{r}
+#Forecasting for the next 12 months
+
+fit_final <- hawaii4 |> 
+  model(ETS = ETS(average))
+
+fit_final |>
+  forecast(h = 12) |>
+  autoplot(hawaii4 |> select(average)) +
+  labs(title = "Seasonal Plot: Monthly C02 Levels", x = "Month", y = "C02 Levels", color = "Year")
+```
+
+```{r}
+#Forecasting for the next 12 months (zoomed in)
+
+fit_final <- hawaii4 |> 
+  model(ETS = ETS(average))
+
+fit_final |>
+  forecast(h = 12) |>
+  autoplot(hawaii4 |> 
+             filter(year(date) >= (max(year(date)) - 10)) |> 
+             select(average)) +
+  labs(title = "Seasonal Plot: Monthly C02 Levels", x = "Month", y = "C02 Levels", color = "Year")
+```
+
+```{r}
+#95% and 99% confidence interval for April C02 level
+
+forecast_values <- fit_final |> 
+  forecast(h = 12)
+forecast_values
+april_pred <- as.numeric(forecast_values[2, 4])
+
+# Calculate the 95% confidence interval
+ci_95_lower <- april_pred - 1.96 * .19
+ci_95_upper <- april_pred + 1.96 * .19
+
+# Calculate the 99% confidence interval
+ci_99_lower <- april_pred - 2.576 * .19
+ci_99_upper <- april_pred + 2.576 * .19
+
+# Print the confidence intervals
+cat("95% Confidence Interval: [", ci_95_lower, ",", ci_95_upper, "]\n")
+cat("99% Confidence Interval: [", ci_99_lower, ",", ci_99_upper, "]\n")
+```
+
+```{r}
+library(fable)
+library(tsibble)
+library(dplyr)
+library(tibble)
+library(lubridate)
+library(ggplot2)
+library(furrr)
+library(future)
+
+hawaii4 <- hawaii3 |>
+  mutate(date = yearmonth(date)) |> 
+  as_tsibble(index = date)
+
+bootstrap_ts <- function(values, start_date, block_size = 12) {
+  total_length <- length(values)
+  starts <- sample(1:(total_length - block_size + 1), ceiling(total_length / block_size), replace = TRUE)
+  
+  boot_vals <- numeric(0)
+  for (s in starts) {
+    boot_vals <- c(boot_vals, values[s:(s + block_size - 1)])
+    if (length(boot_vals) >= total_length) break
+  }
+  boot_vals <- boot_vals[1:total_length]
+  
+  new_dates <- seq(from = start_date, by = 1, length.out = total_length)
+  tibble(
+    date = new_dates,
+    average = boot_vals
+  ) |> as_tsibble(index = date)
+}
+
+# Enable parallel processing
+plan(multisession)  
+
+# set values to avoid recalculating in each iteration
+values <- hawaii4$average
+start_date <- min(hawaii4$date)
+n_boot <- 1000
+set.seed(2025)
+
+# Parallel bootstrapped forecasting
+april_forecasts <- future_map_dbl(1:n_boot, function(i) {
+  boot_sample <- bootstrap_ts(values, start_date, block_size = 12)
+  fit <- boot_sample |> model(ETS = ETS(average))
+  fc <- fit |> forecast(h = 12)
+  as.numeric(fc[2, ".mean"])
+})
+
+
+
+
+```
+
+
+```{r}
+#visualize
+tibble(April_CO2 = april_forecasts) |>
+  ggplot(aes(x = April_CO2)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  geom_vline(aes(xintercept = mean(April_CO2)), color = "red", linetype = "dashed", size = 1.2) +
+  labs(
+    title = "Bootstrapped Forecast Distribution for April 2025 CO₂",
+    subtitle = "From 250 ETS models fit on block-resampled data",
+    x = "Forecasted CO₂ (ppm)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+
+
+```
+
+
+```{r, simulations on ETS}
+set.seed(2025)
+# simulate 1000 future paths from ETS model
+simulations <- fit_final |>
+  generate(h = 12, times = 10000)
+
+# get model forecast (mean predictions for 12 months)
+forecast_values <- fit_final |>
+  forecast(h = 12)
+
+april_point <- tibble(
+  date = yearmonth("2025 Apr"),
+  CO2 = april_pred
+)
+fan_df <- simulations |>
+  as_tibble() |>
+  group_by(date) |>
+  summarise(
+    p10 = quantile(.sim, 0.10),
+    p50 = quantile(.sim, 0.50),
+    p90 = quantile(.sim, 0.90)
+  )
+
+
+# simulation plot with overlays of forecast and predicted point
+ggplot() +
+  geom_line(data = simulations, aes(x = date, y = .sim, group = .rep),
+            alpha = 0.1, color = "steelblue") +                      # Blue simulation paths
+  geom_line(data = forecast_df, aes(x = date, y = .mean),
+            color = "red", size = 1.2) +                            # Red forecast line
+  geom_point(data = april_point, aes(x = date, y = CO2),
+             color = "darkred", size = 3) +                        # April forecast point
+  labs(
+    title = "Simulated Forecast Paths for CO₂ Levels with ETS Model",
+    subtitle = "Red line = forecast | Dark red dot = April 2025 prediction",
+    x = "Date", y = "CO₂ Levels (ppm)"
+  ) +
+geom_ribbon(data = fan_df, aes(x = date, ymin = p10, ymax = p90),
+            fill = "lightblue", alpha = 0.3)+
+  theme_minimal()
+
+```
+
+
+
+
+```{r}
+#Clearing the workspace
+
+rm(list = ls())
+```
+
+

@@ -1,0 +1,281 @@
+---
+title: "BTTF2"
+author: "Kevin Hernandez"
+date: "2025-04-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#reading in data
+hawaii <- read.csv("co2_mm_mlo.csv")
+co.dat <- data.frame(hawaii[56:nrow(hawaii),])
+names(co.dat)[1] <- "values"
+co.dat <- matrix(co.dat$values, ncol = 8, byrow = TRUE)
+co.dat <- as.data.frame(co.dat)
+names(co.dat) <- c("year", "month", "decimal_date", "average", "deseasonalized", "ndays", "sdev", "unc")
+co.dat[] <- sapply(co.dat, as.numeric)
+co.dat <- co.dat[684:nrow(co.dat),]
+#cleaned data is stored in co.dat
+```
+
+```{r}
+library(tseries)
+hawaii <- ts(co.dat$average, frequency = 12, start = c(2015, 2))
+#time series object from co.dat is called hawaii
+plot(hawaii)
+#plotting time series object hawaii
+```
+
+```{r}
+library(itsmr)
+hawaii.15 <- c("season",12,"trend",1)
+hawaii.2 <- Resid(hawaii, hawaii.15)
+#account for linear trend and seasonality in hawaii dataset
+
+test(hawaii.2)
+#steps to test the data
+```
+```{r}
+acf(hawaii.2, lag.max = 24, main = "ACF of Time Series", xaxt = "n")
+axis(1, at=seq(0,2,length.out = 25), labels=seq(0,24,by=1))
+#test for MA() order model...what should the value of q be?
+#looking at this, it seems an AR model would be better to represent this data, as there is no dramatic drop-off in the ACF plot
+pacf(hawaii.2, lag.max = 24, main = "PACF of Time Series", xaxt = "n")
+axis(1, at=seq(0,2,length.out = 25), labels=seq(0,24,by=1))
+#test for an AR() order model...what should the value of p be?
+#looking at this, it seems 1 or 2 would be the most likely value of p (the PACF cuts off after lag 2)
+```
+#first test: MA(11) -- this is where the ACF plot dips below zero. Let's see what the predictions look like.
+
+```{r}
+train <- co.dat[1:(nrow(co.dat)-12),]
+train_hawaii <- ts(train$average, frequency = 12, start = c(2015, 2))
+actual <- co.dat[(109:121),]$average
+#create training/testing data. Trained on data up until the last 12 months. Tested on last 12 months in data. This way we can include a full cycle.
+hawaii.2.train <- Resid(train_hawaii, hawaii.15)
+#account for linear trend and seasonality in train_hawaii dataset
+```
+
+```{r}
+a <- arma(hawaii.2.train, 0, 11)
+#utilizes maximum likelihood to estimate coefficients for MA(11) model
+ma.11 <- forecast(train_hawaii, hawaii.15, a, h = 13, opt = 2)
+#forecasting future points
+resids <- ma.11$pred - actual
+```
+#second test: AR(1) -- likely model.
+```{r}
+b <- arma(hawaii.2.train, 1, 0)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ar.1 <- forecast(train_hawaii, hawaii.15, b, h = 13, opt = 2)
+#forecasting future points
+resids_2 <- ar.1$pred - actual
+```
+#plot above for a comparison
+```{r}
+sub1 <- tail(hawaii,length(ma.11$pred))
+ma_pred_ts <- ts(ma.11$pred, start = start(sub1), frequency = frequency(sub1))
+ar_pred_ts <- ts(ar.1$pred, start = start(sub1), frequency = frequency(sub1))
+#manipulate predcitions so they will plot seamlessly
+```
+
+```{r}
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.11$pred, ar.1$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ma_pred_ts, col = "lightblue", lty = 2, lwd = 2)
+```
+
+```{r}
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.11$pred, ar.1$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ar_pred_ts, col = "red", lty = 2, lwd = 2)
+```
+
+
+
+```{r}
+#Okay, so leaning towards AR() still, but not sure what order. Let's try something different.
+arar_mod<-arar(train_hawaii, h=13, opt=2)
+#super interesting forecast method? Not typical, but in the r manual. Displays optimal lags, coefficients, and filter info.
+resids_3 <- arar_mod$pred-actual
+
+#add to above plot
+```
+
+```{r}
+arar_pred_ts <- ts(arar_mod$pred, start = start(sub1), frequency = frequency(sub1))
+```
+
+```{r}
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.11$pred, ar.1$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(arar_pred_ts, col = "hotpink", lty =2, lwd = 2)
+```
+
+```{r}
+arar_resids<-sum((resids_3)^2)
+ar.1_resids<-sum((resids_2)^2)
+ma.11_resids<-sum((resids)^2)
+```
+
+#Overall, arar model looks the best, followed by the AR(1) model...
+
+#For funzies, let's try other orders of models...we have what makes the most sense but no reason not to experiment!
+
+#test: MA(1)
+
+```{r}
+c <- arma(hawaii.2.train, 0,1)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ma.1 <- forecast(train_hawaii,hawaii.15,c,h=13,opt=2)
+#forecasting future points
+resids_4 <- ma.1$pred-actual
+```
+```{r}
+#plot above MA(1) model
+sub1 <- tail(hawaii,length(ma.1$pred))
+ma1_pred_ts <- ts(ma.1$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.11$pred, ar.1$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ma1_pred_ts, col = "orange", lty =2, lwd = 2)
+```
+
+#test: MA(2)
+
+```{r}
+d <- arma(hawaii.2.train, 0,2)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ma.2 <- forecast(train_hawaii,hawaii.15,d,h=13,opt=2)
+#forecasting future points
+resids_5 <- ma.2$pred-actual
+```
+```{r}
+#plot above MA(1) model
+ma2_pred_ts <- ts(ma.2$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.2$pred, ar.1$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ma2_pred_ts, col = "darkorange", lty =2, lwd = 2)
+```
+
+```{r}
+#test: AR(2)
+
+e <- arma(hawaii.2.train, 2,0)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ar.2 <- forecast(train_hawaii,hawaii.15,e,h=13,opt=2)
+#forecasting future points
+resids_6 <- ar.2$pred-actual
+
+#plot above AR(2) model
+ar2_pred_ts <- ts(ar.2$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.2$pred, ar.2$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ar2_pred_ts, col = "skyblue", lty =2, lwd = 2)
+
+
+```
+```{r}
+#test: MA(12))
+
+f <- arma(hawaii.2.train, 0,12)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ma.12 <- forecast(train_hawaii,hawaii.15,f,h=13,opt=2)
+#forecasting future points
+resids_7 <- ma.12$pred-actual
+
+#plot above MA(12) model
+ma12_pred_ts <- ts(ma.12$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.12$pred, ar.2$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ma12_pred_ts, col = "skyblue4", lty =2, lwd = 2)
+
+
+```
+```{r}
+#test: AR(14))
+
+g <- arma(hawaii.2.train, 14,0)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ar.14 <- forecast(train_hawaii,hawaii.15,g,h=13,opt=2)
+#forecasting future points
+resids_8 <- ar.14$pred-actual
+
+#plot above AR(14) model
+ar14_pred_ts <- ts(ar.14$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.12$pred, ar.14$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ar14_pred_ts, col = "skyblue4", lty =2, lwd = 2)
+
+
+```
+```{r}
+#test: AR(3))
+
+h <- arma(hawaii.2.train, 3,0)
+#utilizes maximum likelihood to estimate coefficients for AR(1) model
+ar.3 <- forecast(train_hawaii,hawaii.15,h,h=13,opt=2)
+#forecasting future points
+resids_9 <- ar.3$pred-actual
+
+#plot above AR(14) model
+ar3_pred_ts <- ts(ar.3$pred, start = start(sub1), frequency = frequency(sub1))
+plot(hawaii, type = "l", col = "black", lwd = 2, 
+     xlim = c(start(hawaii)[1], end(hawaii)[1]), 
+     ylim = range(c(hawaii, ma.12$pred, ar.3$pred)),
+     xlab = "Time", ylab = "CO2 Levels", main = "Actual vs. Predicted")
+
+lines(ar3_pred_ts, col = "skyblue4", lty =2, lwd = 2)
+```
+```{r}
+ma.1_resids<-sum((resids_4)^2)
+ma.2_resids<-sum((resids_5)^2)
+ar.2_resids<-sum((resids_6)^2)
+ma.12_resids<-sum((resids_7)^2)
+ar.14_resids<-sum((resids_8)^2)
+ar.3_resids <-sum((resids_9)^2)
+
+all_resids <- c(ar.3_resids,ma.1_resids, ma.2_resids, ar.2_resids, ma.12_resids, ar.14_resids, ar.1_resids, arar_resids, ma.11_resids)
+
+sort(all_resids)
+
+#okay, so the "best" is likely the arar model, followed by the MA(12), the AR(14), the AR(2), the MA(11), the AR(1), the MA(1), and the MA(2).
+
+#let's take another look at this arar model then
+arar_mod_final <- arar(hawaii, h =2, opt=2)
+#let's break this down.
+#if we want to predict the next two months of data, we have our optimal lags
+#look at this creating an AR model with the following equation
+#y_t=0.7784(y_(t-1)) + 0.2528(y_(t-11)) - 0.5813(y_(t-12)) + 0.267(y_(t-14))
+#built in confidence intervals YAY 
+#represents an AR(14) model strangely enough lol
+
+```

@@ -1,0 +1,146 @@
+---
+title: "BTTF3"
+author: "Kevin Hernandez"
+date: "2025-04-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Downloading data
+co2_data_raw <- read.csv("co2_mm_mlo.csv")
+
+#Cleaning data - was loaded in weird
+co2_data_raw <- data.frame(co2_data_raw[56:nrow(co2_data_raw),])
+names(co2_data_raw)[1] = "values"
+
+co2_data_raw <- matrix(co2_data_raw$values, ncol = 8, byrow = TRUE)
+
+co2_data_raw <- as.data.frame(co2_data_raw)
+names(co2_data_raw) = c("year", "month", "decimal_date", "average", "deseasonalized", "ndays", "sdev", "unc")
+
+co2_data_raw[] = sapply(co2_data_raw, as.numeric)
+
+#Filtering for last 10 years (starting at Feb 2015)
+#which(co2_data_raw$year == 2015 & co2_data_raw$month == 2)
+co2_data = co2_data_raw[684:nrow(co2_data_raw),]
+
+#Make a time series object (monthly data)
+ts_data <- ts(co2_data$average, frequency = 12, start = c(2015,2))
+
+# Plot the time series
+plot(ts_data)
+
+```
+```{r}
+# Remove trend by differencing
+diff_ts <- diff(ts_data)
+plot(diff_ts)
+
+# Adjust for seasonality
+monthly_means <- tapply(diff_ts, cycle(diff_ts), mean)
+adjusted_ts <- (diff_ts - monthly_means[cycle(diff_ts)])
+adjusted_ts <- ts(adjusted_ts,
+                  start = start(diff_ts),
+                  frequency = frequency(diff_ts))
+
+# Checking for AR(p) or MA(q) signatures
+
+```
+```{r}
+# ACF plot
+acf(ts_data, lag.max = 24, main = "ACF of Time Series", xaxt = "n")
+axis(1, at = seq(0, 2, length.out = 25), labels = seq(0, 24, by = 1))
+
+# PACF plot
+pacf(ts_data, lag.max = 24, main = "PACF of Time Series", xaxt = "n")
+axis(1, at = seq(0, 2, length.out = 25), labels = seq(0, 24, by = 1))
+
+```
+
+```{r}
+library(forecast)  
+# Predicting last month as an example
+train_data <- co2_data[1:(nrow(co2_data) - 1),]
+train_ts <- ts(train_data$average, frequency = 12, start = c(2015, 2))
+actual_val <- co2_data[nrow(co2_data),]$average
+
+# Remove trend by differencing
+diff_train <- diff(train_ts)
+
+# Adjust for seasonality
+monthly_means <- tapply(diff_train, cycle(diff_train), mean)
+adjusted_ts <- (diff_train - monthly_means[cycle(diff_train)])
+adjusted_ts <- ts(adjusted_ts,
+                  start = start(diff_train),
+                  frequency = frequency(diff_train))
+
+# Fit ARIMA model. Auto ARIMA finds best p and q based on AIC
+model_auto <- auto.arima(adjusted_ts)
+```
+
+```{r}
+# Forecast for 1 period ahead
+forecast_values <- forecast(model_auto, h = 1)
+# Adding back in trend
+# Get the last observed value of the original series
+last_observed_value <- train_ts[length(train_ts)]
+
+# Need to specify index = 2 for 95% conf ID
+forecast_trend <- c(forecast_values$lower[2], forecast_values$mean, forecast_values$upper[2]) + last_observed_value
+
+# Adding back in seasonality (using 2 because we are predicting February)
+final_forecast <- forecast_trend[2] + as.numeric(monthly_means[2])
+
+final_forecast
+```
+```{r}
+# Model: ARIMA(0,0,2)
+model_c <- arima(adjusted_ts, order = c(0, 0, 2))
+forecast_values <- forecast(model_c, h = 1)
+
+AIC(model_c)
+plot(forecast_values)
+
+# Extract AR (phi) and MA (theta) coefficients
+thetas <- coef(model_auto)
+
+# Tests of randomness
+ljung_box_test <- Box.test(residuals(model_c), lag = 12, type = "Ljung-Box")
+```
+```{r}
+# Compared to ARIMA(1,1,0)
+arma_1_1_model <- arima(adjusted_ts, order = c(1, 0, 1))
+
+# Forecast for 1 period ahead
+forecast_values_1 <- forecast(arma_1_1_model, h = 1)
+
+# Adding back in trend
+last_observed_value <- train_ts[length(train_ts)]
+forecast_trend_1 <- c(forecast_values_1$lower[2], forecast_values_1$mean, forecast_values_1$upper[2]) + last_observed_value
+
+# Adding back in seasonality
+final_forecast_1 <- forecast_trend_1[2] + as.numeric(monthly_means[2])
+
+AIC(arma_1_1_model)
+coef(arma_1_1_model)
+
+# Fitting a linear model
+feb_data <- filter(co2_data_raw, month == 2, year >= 2010, year <= 2025)
+feb_data$year_index <- seq(1, nrow(feb_data))
+
+lm_mod <- lm(average ~ poly(year_index, 2), data = feb_data)
+summary(lm_mod)
+
+```
+```{r}
+# 2025 Feb CO2 level
+feb_2025 <- co2_data$average[which(co2_data$year == 2025 & co2_data$month == 2)]
+
+predict(lm_mod, data.frame(year_index = 16))
+```
+
+
